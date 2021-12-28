@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 import torch
 import torch.nn as nn
 
-from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS
+from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS,CBAM
 from models.experimental import MixConv2d, CrossConv, C3
 from utils.general import check_anchor_order, make_divisible, check_file, set_logging
 from utils.torch_utils import (
@@ -78,6 +78,7 @@ class Detect(nn.Module):  # 定义检测网络
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):  # nl = 3    in:(batch_size, no * na, size1, size2)
+            # x[i].shape(batch_size , (5+nc+180) * na, size1/8*(i+1) , size2/8*(i+1))
             x[i] = self.stem[i](x[i])
 
             x_obj_convs = self.obj_convs[i](x[i])
@@ -90,8 +91,8 @@ class Detect(nn.Module):  # 定义检测网络
             x_ang_preds = self.angle_preds[i](x_ang_convs)
             x_cls_preds = self.cls_preds[i](x_cls_convs)
             # x[i].shape(batch_size , (5+nc+180) * na, size1/8*(i+1) , size2/8*(i+1))
-            #x[i] = self.m[i](x[i])  # conv  yolo_out[i] 对各size的feature map分别进行head检测 small medium large
-            x[i] = self.concats[i]([x_loc_preds,x_obj_preds,x_cls_preds, x_ang_preds])
+            # x[i] = self.m[i](x[i])  # conv  yolo_out[i] 对各size的feature map分别进行head检测 small medium large
+            x[i] = self.concats[i]([x_loc_preds, x_obj_preds, x_cls_preds, x_ang_preds])
 
             # ny为featuremap的height， nx为featuremap的width
             bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc+180) * na, size1', size2')
@@ -419,6 +420,9 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         elif m is Concat:
             # 以第一个concat为例 ： ch[-1] + ch[x+1] = ch[-1]+ch[7] = 640 + 640 = 1280
             c2 = sum([ch[-1 if x == -1 else x + 1] for x in f])
+        elif m is CBAM:
+            c2 = c1 = ch[f]
+            args = [ch[f]]
         elif m is Detect:
             args.append([ch[x + 1] for x in f])
             if isinstance(args[1], int):  # number of anchors
@@ -466,7 +470,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5l.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5m_cbam.yaml', help='model.yaml')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
@@ -478,10 +482,9 @@ if __name__ == '__main__':
     model.train()
 
     # Profile
-    img = torch.rand(1, 3, 1024, 1024).to(device)
+    img = torch.rand(4 if torch.cuda.is_available() else 1, 3, 1024, 1024).to(device)
     y = model(img)
     print("ending")
-
     # ONNX export
     # model.model[-1].export = True
     # torch.onnx.export(model, img, opt.cfg.replace('.yaml', '.onnx'), verbose=True, opset_version=11)
