@@ -38,8 +38,24 @@ class Detect(nn.Module):  # 定义检测网络
         # register_buffer用法：内存中定义一个常量，同时，模型保存和加载的时候可以写入和读出
         self.register_buffer('anchors', a)  # shape(nl,na,2) = (3, 3, 2)
         # shape(3, 3, 2) -> shape(3, 1, 3, 1, 1, 2)
-        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,？(na),1,1,2) = (3, 1, 3, 1, 1, 2)
-        self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
+        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))
+        # shape(nl,1,？(na),1,1,2) = (3, 1, 3, 1, 1, 2)
+
+        self.stem = nn.ModuleList(Conv(x, 256, 3, 1, 1) for x in ch)
+
+        self.loc_convs   = nn.ModuleList(nn.Sequential(Conv(256, 256, 3, 1, 1), Conv(256, x, 3, 1, 1)) for x in ch)
+        self.angle_convs = nn.ModuleList(nn.Sequential(Conv(256, 256, 3, 1, 1), Conv(256, x, 3, 1, 1)) for x in ch)
+        self.obj_convs   = nn.ModuleList(nn.Sequential(Conv(256, 256, 3, 1, 1), Conv(256, x, 3, 1, 1)) for x in ch)
+        self.cls_convs   = nn.ModuleList(nn.Sequential(Conv(256, 256, 3, 1, 1), Conv(256, x, 3, 1, 1)) for x in ch)
+
+        self.loc_preds   = nn.ModuleList(nn.Conv2d(x, 4 * self.na, 1) for x in ch)
+        self.angle_preds = nn.ModuleList(nn.Conv2d(x, self.angle * self.na,1) for x in ch)
+        self.obj_preds   = nn.ModuleList(nn.Conv2d(x, self.na, 1) for x in ch)
+        self.cls_preds   = nn.ModuleList(nn.Conv2d(x, self.nc * self.na, 1) for x in ch)
+
+        self.concats     = nn.ModuleList(Concat() for x in ch)
+
+        #self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
         '''
         m(
             (0) :  nn.Conv2d(in_ch[0]（17）, (nc + 5 + self.angle) * na, kernel_size=1)  # 每个锚框中心点有3种尺度的anchor，每个anchor有 no 个输出
@@ -62,8 +78,21 @@ class Detect(nn.Module):  # 定义检测网络
         z = []  # inference output
         self.training |= self.export
         for i in range(self.nl):  # nl = 3    in:(batch_size, no * na, size1, size2)
+            x[i] = self.stem[i](x[i])
+
+            x_obj_convs = self.obj_convs[i](x[i])
+            x_loc_convs = self.loc_convs[i](x[i])
+            x_ang_convs = self.angle_convs[i](x[i])
+            x_cls_convs = self.cls_convs[i](x[i])
+
+            x_obj_preds = self.obj_preds[i](x_obj_convs)
+            x_loc_preds = self.loc_preds[i](x_loc_convs)
+            x_ang_preds = self.angle_preds[i](x_ang_convs)
+            x_cls_preds = self.cls_preds[i](x_cls_convs)
             # x[i].shape(batch_size , (5+nc+180) * na, size1/8*(i+1) , size2/8*(i+1))
-            x[i] = self.m[i](x[i])  # conv  yolo_out[i] 对各size的feature map分别进行head检测 small medium large
+            #x[i] = self.m[i](x[i])  # conv  yolo_out[i] 对各size的feature map分别进行head检测 small medium large
+            x[i] = self.concats[i]([x_loc_preds,x_obj_preds,x_cls_preds, x_ang_preds])
+
             # ny为featuremap的height， nx为featuremap的width
             bs, _, ny, nx = x[i].shape  # x[i]:(batch_size, (5+nc+180) * na, size1', size2')
 
@@ -257,11 +286,23 @@ class Model(nn.Module):
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
         '''
         m = self.model[-1]  # Detect() module
-        for mi, s in zip(m.m, m.stride):  # from
-            b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
-            b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
-            b[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
-            mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+
+        for ml,mo,mc,ma,s in zip(m.loc_preds, m.obj_preds, m.cls_preds, m.angle_preds, m.stride):  # from
+            #b = mi.bias.view(m.na, -1) # conv.bias(255) to (3,85)
+            bl = ml.bias.view(m.na, -1)
+            bo = mo.bias.view(m.na, -1)
+            bc = mc.bias.view(m.na, -1)
+            ba = ma.bias.view(m.na, -1)
+            with torch.no_grad():
+                #b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+                bo += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+                bc += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+                ba += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+                #b[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+            #mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            mo.bias = torch.nn.Parameter(bo.view(-1),requires_grad=True)
+            mc.bias = torch.nn.Parameter(bc.view(-1),requires_grad=True)
+            ma.bias = torch.nn.Parameter(ba.view(-1),requires_grad=True)
 
     def _print_biases(self):
         m = self.model[-1]  # Detect() module
@@ -425,7 +466,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5x.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5l.yaml', help='model.yaml')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
@@ -437,8 +478,9 @@ if __name__ == '__main__':
     model.train()
 
     # Profile
-    # img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 640, 640).to(device)
-    # y = model(img, profile=True)
+    img = torch.rand(1, 3, 1024, 1024).to(device)
+    y = model(img)
+    print("ending")
 
     # ONNX export
     # model.model[-1].export = True
