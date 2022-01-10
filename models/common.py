@@ -236,3 +236,74 @@ class CBAM(nn.Module):
         x = self.channel_attn(x)*x
         y = self.sptial_attn(x)*x
         return y
+
+class SAM(nn.Module):
+    def __init__(self, in_channels, width, height):
+        super(SAM, self).__init__()
+        self.width  = width
+        self.height = height
+
+        self.wam = nn.Conv2d(width, in_channels,  1)
+        self.ham = nn.Conv2d(height, in_channels, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        xh = x.transpose(-2, -3)
+        xw = x.transpose(-1, -3)
+
+        yh = self.ham(xh)
+        yw = self.wam(xw)
+
+        y = yw @ yh
+        y = self.sigmoid(y)
+        return y
+
+class DAM(nn.Module):
+    def __init__(self, in_planes, width, height):
+        super(DAM, self).__init__()
+        self.width = width
+        self.height = height
+        self.cam = ChannelAttention(in_planes=in_planes)
+        self.sam = SAM(in_channels=in_planes, width=width, height=height)
+
+    def forward(self, x):
+        x = self.cam(x) * x
+        y = self.sam(x) * x
+        return y
+
+def window_partition(x, window_size):
+    x = x.permute(0, 2, 3, 1)
+    B,H,W,C = x.shape
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    windows = windows.permute(0, 3, 1, 2)
+    return windows
+
+def window_reverse(windows, window_size, H, W):
+    windows = windows.permute(0, 2, 3, 1)
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    x = x.permute(0, 3, 1, 2)
+    return x
+
+
+class BDAM(nn.Module):
+    def __init__(self, in_planes, width, height):
+        super(BDAM, self).__init__()
+        self.width = width
+        self.height= height
+        self.window_size = min(self.width // 4, self.height //4)
+        self.dam = DAM(in_planes, self.window_size, self.window_size)
+
+    def forward(self, x):
+        x = window_partition(x, self.window_size)
+        x = self.dam(x)
+        y  = window_reverse(x,self.window_size, H=self.height, W=self.width)
+        return y
+
+if __name__ == "__main__":
+    x = torch.randn([4,256,64,64])
+    m = BDAM(in_planes=256, width=64,height=64)
+    y = m(x)
+    print("ending")
