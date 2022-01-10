@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 import torch
 import torch.nn as nn
 
-from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS,CBAM
+from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS,CBAM,DAM,BDAM
 from models.experimental import MixConv2d, CrossConv, C3
 from utils.general import check_anchor_order, make_divisible, check_file, set_logging
 from utils.torch_utils import (
@@ -188,9 +188,10 @@ class Model(nn.Module):
             s = 128  # 2x min stride
             # 此时 x.shape = (1, 3, s/8或16或32, 5+nc)  所以 x.shape[-2]=[s/8, s/16, s/32]
             # tensor: stride = ([ 8., 16., 32.])
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            #m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
             # 先将stride维度提升到(3, 1, 1) 之后进行每个维度的数据处理，使得 detect类的成员变量anchors由原图的尺度对应到最终的featuremaps尺度
             # anchor(3, 3, 2)  anchors: -> anchor(0,:,:)/ 8. , anchor(1,:,:)/ 16.  anchor(2,:,:)/ 32.
+            m.stride = torch.Tensor([8, 16, 32], device='cpu')
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)  # 确保anchors的元素顺序是从小物体的anchor到大物体的anchor
             # self.stride = ([ 8., 16., 32.])
@@ -423,6 +424,9 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         elif m is CBAM:
             c2 = c1 = ch[f]
             args = [ch[f]]
+        elif (m is DAM) or (m is BDAM):
+            c2 = c1 = ch[f]
+            args = [c1, *args]
         elif m is Detect:
             args.append([ch[x + 1] for x in f])
             if isinstance(args[1], int):  # number of anchors
@@ -470,7 +474,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5m_cbam.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5m_dam.yaml', help='model.yaml')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file
@@ -482,7 +486,7 @@ if __name__ == '__main__':
     model.train()
 
     # Profile
-    img = torch.rand(4 if torch.cuda.is_available() else 1, 3, 1024, 1024).to(device)
+    img = torch.rand(2 if torch.cuda.is_available() else 1, 3, 1024, 1024).to(device)
     y = model(img)
     print("ending")
     # ONNX export
